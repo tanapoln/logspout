@@ -34,10 +34,6 @@ func NewRawAdapter(route *router.Route) (router.LogAdapter, error) {
 	if !found {
 		return nil, errors.New("bad transport: " + route.Adapter)
 	}
-	conn, err := transport.Dial(route.Address, route.Options)
-	if err != nil {
-		return nil, err
-	}
 	tmplStr := "{{.Data}}\n"
 	if os.Getenv("RAW_FORMAT") != "" {
 		tmplStr = os.Getenv("RAW_FORMAT")
@@ -46,18 +42,40 @@ func NewRawAdapter(route *router.Route) (router.LogAdapter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Adapter{
-		route: route,
-		conn:  conn,
-		tmpl:  tmpl,
-	}, nil
+
+	adapter := &Adapter{
+		route:     route,
+		tmpl:      tmpl,
+		transport: transport,
+	}
+	err = adapter.initConnection()
+	return adapter, err
 }
 
 // Adapter is a simple adapter that streams log output to a connection without any templating
 type Adapter struct {
-	conn  net.Conn
-	route *router.Route
-	tmpl  *template.Template
+	conn      net.Conn
+	route     *router.Route
+	tmpl      *template.Template
+	transport router.AdapterTransport
+}
+
+func (a *Adapter) initConnection() error {
+	if a.conn != nil {
+		err := a.conn.Close()
+		if err != nil {
+			log.Printf("raw: cannot close existing connection: %s, skiping...", err)
+		}
+	}
+	a.conn = nil
+
+	conn, err := a.transport.Dial(a.route.Address, a.route.Options)
+	if err != nil {
+		return err
+	}
+
+	a.conn = conn
+	return nil
 }
 
 // Stream sends log data to a connection
@@ -74,7 +92,11 @@ func (a *Adapter) Stream(logstream chan *router.Message) {
 		if err != nil {
 			log.Println("raw:", err)
 			if reflect.TypeOf(a.conn).String() != "*net.UDPConn" {
-				return
+				err = a.initConnection()
+				if err != nil {
+					log.Println("raw: reconnect err:", err)
+					return
+				}
 			}
 		}
 	}
